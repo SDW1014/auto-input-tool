@@ -37,7 +37,7 @@ executables = [
 # 설정
 setup(
     name="마우스 자동 클릭기 & 키보드 연타",
-    version="1.4.0",  # 키보드 제어 안정성 대폭 개선 버전
+    version="1.5.0",  # 탭 기반 UI 업데이트
     description="마우스 자동 클릭 및 키보드 연속 입력 프로그램",
     options={"build_exe": build_exe_options},
     executables=executables

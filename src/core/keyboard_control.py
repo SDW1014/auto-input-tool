@@ -69,6 +69,8 @@ class KeyboardController:
                                     self._log(f"워치독: 키 {key}가 눌려있지 않은데 스레드가 활성 상태, 스레드 종료")
                                     self._stop_key_repeat(key)
                     
+                    # ※ 다음 체크는 연타 모드에서는 무시 - 연타 모드는 실제 키보드 상태와 관계없이 계속 반복해야 함
+                    """
                     # 실제 키보드 상태와 내부 상태 동기화 확인
                     for key in self.enabled_keys:
                         # 키보드 라이브러리를 통해 실제 키 상태 확인
@@ -82,6 +84,7 @@ class KeyboardController:
                                 self.handle_key_release(key)
                         except:
                             pass
+                    """
                 except Exception as e:
                     self._log(f"워치독 오류: {e}")
                 
@@ -265,106 +268,120 @@ class KeyboardController:
             # 키가 활성화되어 있는지 확인
             if key not in self.enabled_keys:
                 return False
-            
+
             with self.lock:
-                # 키 눌림 상태 업데이트
+                # 이미 해제된 상태면 무시
+                if not self.pressed_keys.get(key, False):
+                    return False
+
+                # 눌림 상태 업데이트
                 self.pressed_keys[key] = False
-                
+
                 # 반복 중지
-                if key in self.active_threads:
-                    self._stop_key_repeat(key)
-                
-                # 키 상태 확실히 초기화
-                self._clean_key_state(key)
+                self._stop_key_repeat(key)
+
                 return True
-            
         except Exception as e:
-            self._log(f"키 해제 처리 중 오류: {e}")
+            self._log(f"키 {key} 해제 처리 중 오류: {e}")
             traceback.print_exc()
             return False
     
     def _start_key_repeat(self, key):
-        """키 반복 시작"""
+        """키 반복 스레드 시작"""
         try:
             # 이미 실행 중인 스레드가 있으면 중지
             if key in self.active_threads:
                 self._stop_key_repeat(key)
-                time.sleep(0.05)  # 더 긴 지연으로 안정성 확보
+                time.sleep(0.05)  # 스레드 종료까지 기다림
+
+            # 새 종료 이벤트 생성
+            self.stop_signals[key] = threading.Event()
             
-            # 종료 신호 객체 생성
-            stop_signal = threading.Event()
-            self.stop_signals[key] = stop_signal
-            
-            # 스레드 생성
-            thread = threading.Thread(
+            # 키 반복 스레드 시작
+            repeat_thread = threading.Thread(
                 target=self._key_repeat_worker,
-                args=(key, stop_signal),
-                daemon=True,
-                name=f"KeyRepeat_{key}"
+                args=(key, self.stop_signals[key]),
+                daemon=True
             )
+            self.active_threads[key] = repeat_thread
+            repeat_thread.start()
             
-            # 스레드를 활성 스레드 목록에 추가
-            self.active_threads[key] = thread
-            
-            # 스레드 시작
-            thread.start()
             return True
-                
         except Exception as e:
-            self._log(f"키 반복 시작 실패: {e}")
+            self._log(f"키 {key} 반복 시작 중 오류: {e}")
             traceback.print_exc()
             return False
-    
+
     def _stop_key_repeat(self, key):
-        """키 반복 중지"""
+        """키 반복 스레드 중지"""
         try:
-            # 종료 신호 전송
+            # 키가 없으면 무시
+            if key not in self.active_threads:
+                return True
+
+            # 종료 신호 설정
             if key in self.stop_signals:
                 self.stop_signals[key].set()
             
-            # 키 해제
-            try:
-                keyboard.release(key)
-            except:
-                pass
+            # 스레드 종료 대기 (최대 0.2초)
+            if self.active_threads[key].is_alive():
+                self.active_threads[key].join(0.2)
             
-            # 스레드 종료 대기 (최대 0.1초)
-            if key in self.active_threads:
-                try:
-                    self.active_threads[key].join(0.1)
-                except:
-                    pass
-            
-            # 스레드 목록에서 제거
-            if key in self.active_threads:
-                del self.active_threads[key]
-            if key in self.stop_signals:
-                del self.stop_signals[key]
-            
+            # 상태 초기화
+            self._clean_key_state(key)
             return True
         except Exception as e:
-            self._log(f"키 반복 중지 중 오류: {e}")
-            traceback.print_exc()
+            self._log(f"키 {key} 반복 중지 중 오류: {e}")
             return False
     
     def _stop_all_repeats(self):
-        """모든 키 반복 중지"""
+        """모든 키 반복 중지 (내부 메서드)"""
         keys = list(self.active_threads.keys())
         for key in keys:
             self._stop_key_repeat(key)
     
+    def stop_all_repeats(self):
+        """모든 키 반복 중지 (공개 인터페이스)"""
+        self._log("모든 키 반복 중지 요청 - 모든 스레드 종료 시작")
+        
+        # 모든 스레드 중지
+        self._stop_all_repeats()
+        
+        # 키 상태 초기화
+        with self.lock:
+            for key in list(self.pressed_keys.keys()):
+                self.pressed_keys[key] = False
+                try:
+                    keyboard.release(key)
+                except:
+                    pass
+        
+        self._log("모든 키 반복 중지 완료")
+        return True
+    
     def _key_repeat_worker(self, key, stop_signal):
         """키 반복 작업 스레드"""
         try:
+            # 시작 상태 로깅
+            self._log(f"키 '{key}' 반복 스레드 시작됨 (모드 활성화: {self.mode_active})")
+            
             # 재실행 방지를 위한 마지막 실행 시간 기록
             last_executed = time.time()
             retry_count = 0
+            repeat_count = 0
             
-            # 종료 신호가 올 때까지 반복
+            # 종료 신호가 올 때까지 반복 - 연타 모드에서는 키가 눌린 상태로 계속 유지
             while not stop_signal.is_set() and self.pressed_keys.get(key, False) and self.mode_active:
                 # 키 상태 재확인 - 중요한 안정성 체크
-                if not self.pressed_keys.get(key, False) or stop_signal.is_set() or not self.mode_active:
+                if stop_signal.is_set() or not self.mode_active:
+                    self._log(f"키 '{key}' 반복 중지 요청 감지: stop_signal={stop_signal.is_set()}, mode={self.mode_active}")
                     break
+                
+                # 내부 상태에서만 키가 해제되었는지 확인 (워치독에 의한 강제 해제 방지)
+                if not self.pressed_keys.get(key, False):
+                    # 연타 모드에서는 키를 다시 눌린 상태로 설정 (워치독에 의한 자동 해제 방지)
+                    self.pressed_keys[key] = True
+                    self._log(f"키 '{key}' 상태가 해제되었지만 연타 모드에서 다시 설정됨")
                 
                 current_time = time.time()
                 # 너무 빠른 실행 방지 (최소 간격 보장)
@@ -381,6 +398,12 @@ class KeyboardController:
                     
                     # 성공적으로 실행됨을 기록
                     last_executed = time.time()
+                    repeat_count += 1
+                    
+                    # 10회마다 상태 로깅
+                    if repeat_count % 10 == 0:
+                        self._log(f"키 '{key}' {repeat_count}회 입력됨")
+                        
                     retry_count = 0  # 성공 시 재시도 카운트 초기화
                 except Exception as e:
                     # 개별 키 입력 실패 시 재시도
@@ -400,38 +423,62 @@ class KeyboardController:
                     else:
                         time.sleep(self.retry_delay)
                 
-                # 종료 조건 다시 확인
-                if stop_signal.is_set() or not self.pressed_keys.get(key, False) or not self.mode_active:
+                # 종료 조건 다시 확인 - 연타 모드에서는 stop_signal과 mode_active만 확인
+                if stop_signal.is_set() or not self.mode_active:
                     break
         except Exception as e:
-            self._log(f"키 반복 스레드 오류: {e}")
+            self._log(f"키 '{key}' 반복 스레드 오류: {e}")
             traceback.print_exc()
         finally:
             # 항상 키 해제 및 상태 정리
             try:
                 keyboard.release(key)
+                self._log(f"키 '{key}' 반복 스레드 종료됨 (총 {repeat_count}회 입력)")
             except:
                 pass
     
     def set_repeat_speed(self, speed_level=2):
-        """키 반복 속도 설정 (1=느림, 2=중간, 3=빠름, 4=매우 빠름)"""
+        """
+        키 반복 속도 설정
+        
+        매개변수:
+            speed_level: 정수(1-4) 또는 초 단위 실수값
+                - 정수인 경우: 1=느림, 2=중간, 3=빠름, 4=매우 빠름
+                - 실수인 경우: 키 입력 사이의 지연 시간(초)
+        """
         with self.lock:
-            if speed_level == 1:  # 느림
-                self.press_delay = 0.03
-                self.release_delay = 0.03
-            elif speed_level == 2:  # 중간 (기본)
+            # 실수값으로 직접 전달된 경우 (초 단위 지연)
+            if isinstance(speed_level, float) and 0.01 <= speed_level <= 1.0:
+                delay = max(min(speed_level / 2, 0.5), 0.005)  # 안전한 범위로 조정
+                self.press_delay = delay
+                self.release_delay = delay
+                self._log(f"반복 속도 직접 설정: {speed_level}초")
+                return True
+                
+            # 정수 레벨로 전달된 경우
+            try:
+                level = int(speed_level)
+                if level == 1:  # 느림
+                    self.press_delay = 0.03
+                    self.release_delay = 0.03
+                elif level == 2:  # 중간 (기본)
+                    self.press_delay = 0.02
+                    self.release_delay = 0.02
+                elif level == 3:  # 빠름
+                    self.press_delay = 0.01
+                    self.release_delay = 0.01
+                elif level == 4:  # 매우 빠름
+                    self.press_delay = 0.005
+                    self.release_delay = 0.005
+                else:
+                    # 기본값 (중간)
+                    self.press_delay = 0.02
+                    self.release_delay = 0.02
+            except (ValueError, TypeError):
+                # 변환 실패 시 기본값
                 self.press_delay = 0.02
                 self.release_delay = 0.02
-            elif speed_level == 3:  # 빠름
-                self.press_delay = 0.01
-                self.release_delay = 0.01
-            elif speed_level == 4:  # 매우 빠름
-                self.press_delay = 0.005
-                self.release_delay = 0.005
-            else:
-                # 기본값 (중간)
-                self.press_delay = 0.02
-                self.release_delay = 0.02
+                
             return True
 
     def get_status_info(self):
@@ -483,6 +530,60 @@ class KeyboardController:
                 self.pressed_keys[key] = False
                 
             return True
+
+    # 공개 인터페이스: KeyboardTab에서 사용
+    def start_key_repeat(self, key, repeat_speed=None):
+        """키 반복 시작 (공개 인터페이스)"""
+        # 모드가 비활성화 상태라면 활성화
+        if not self.mode_active:
+            self.enable_mode(True)
+            self._log(f"키 반복 시작 요청으로 모드 자동 활성화됨")
+        
+        # 반복 속도 설정
+        if repeat_speed is not None:
+            self.set_repeat_speed(repeat_speed)
+            
+        # 키 활성화 확인
+        if key not in self.enabled_keys:
+            self.enable_key(key)
+            
+        # 워치독에서 실제 키 상태를 확인하지 않도록 키를 눌린 상태로 명시적 설정
+        with self.lock:
+            self.pressed_keys[key] = True
+            self._log(f"키 '{key}' 반복 모드에서 눌린 상태로 설정됨")
+            
+        # 키 눌림 처리
+        return self.handle_key_press(key)
+    
+    def update_repeat_speed(self, key, repeat_speed):
+        """키 반복 속도 업데이트 (공개 인터페이스)"""
+        self.set_repeat_speed(repeat_speed)
+        return True
+    
+    def stop_key_repeat(self, key):
+        """특정 키의 반복을 중지 (공개 인터페이스)"""
+        self._log(f"키 '{key}' 반복 중지 요청")
+        
+        # 키가 없으면 무시
+        if key not in self.active_threads:
+            self._log(f"키 '{key}'는 현재 반복 중이 아님")
+            return True
+
+        # 키 반복 중지
+        success = self._stop_key_repeat(key)
+        
+        # 키 상태 초기화
+        with self.lock:
+            if key in self.pressed_keys:
+                self.pressed_keys[key] = False
+            
+            try:
+                keyboard.release(key)
+            except:
+                pass
+        
+        self._log(f"키 '{key}' 반복 중지 완료")
+        return success
 
 # 전역 인스턴스
 keyboard_controller = KeyboardController() 

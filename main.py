@@ -6,12 +6,12 @@
 import tkinter as tk
 import traceback
 import sys
-from src.gui.auto_clicker_app import AutoClickerApp
+from src.gui.tab_based_app import TabBasedApp
 
 if __name__ == "__main__":
     try:
         root = tk.Tk()
-        app = AutoClickerApp(root)
+        app = TabBasedApp(root)
         print("[메인] 애플리케이션 초기화 완료")
         root.mainloop()
     except Exception as e:

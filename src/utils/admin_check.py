@@ -6,6 +6,7 @@
 """
 import sys
 import ctypes
+import os
 
 def is_admin():
     """
@@ -22,6 +23,7 @@ def is_admin():
 def run_as_admin():
     """
     프로그램을 관리자 권한으로 다시 실행합니다.
+    현재 프로세스는 종료합니다.
     """
     ctypes.windll.shell32.ShellExecuteW(
         None,
@@ -30,4 +32,6 @@ def run_as_admin():
         " ".join(sys.argv),
         None,
         1  # SW_SHOWNORMAL
-    ) 
+    )
+    # 현재 프로세스 종료
+    sys.exit(0) 
